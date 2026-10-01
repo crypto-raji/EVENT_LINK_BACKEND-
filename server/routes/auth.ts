@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import jwt from 'jsonwebtoken';
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { User } from '../models/User';
 import { inMemoryStore, isConnectedToMongo } from '../db';
 import { sendRegistrationEmail } from '../services/emailService';
@@ -8,19 +9,50 @@ import { hashPassword, verifyPassword } from '../services/password';
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'eventlink_production_jwt_secret_key_2026';
 
+function derivePasswordHash(password: string, salt: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scryptCallback(password, salt, 64, (error, derivedKey) => {
+      if (error) reject(error);
+      else resolve(derivedKey);
+    });
+  });
+}
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16).toString('hex');
+  const hash = await derivePasswordHash(password, salt);
+  return `scrypt:${salt}:${hash.toString('hex')}`;
+}
+
+async function verifyPassword(password: string, storedHash: string): Promise<{ valid: boolean; needsUpgrade: boolean }> {
+  const [scheme, salt, encodedHash] = storedHash.split(':');
+  if (scheme === 'scrypt' && salt && encodedHash) {
+    try {
+      const expectedHash = Buffer.from(encodedHash, 'hex');
+      const actualHash = await derivePasswordHash(password, salt);
+      return {
+        valid: expectedHash.length === actualHash.length && timingSafeEqual(expectedHash, actualHash),
+        needsUpgrade: false,
+      };
+    } catch {
+      return { valid: false, needsUpgrade: false };
+    }
+  }
+
+  // Existing records stored the raw password; upgrade only after a successful login.
+  const actual = Buffer.from(password);
+  const expected = Buffer.from(storedHash);
+  const valid = actual.length === expected.length && timingSafeEqual(actual, expected);
+  return { valid, needsUpgrade: valid };
+}
+
 // Registration Route (Saves user to MongoDB Atlas & Sends Immediate Welcome Email)
 router.post('/register', async (req, res) => {
   try {
     const { email, password, fullName } = req.body;
 
-    if (
-      typeof email !== 'string' ||
-      typeof password !== 'string' ||
-      typeof fullName !== 'string' ||
-      !email.trim() ||
-      !password ||
-      !fullName.trim()
-    ) {
+    if (typeof email !== 'string' || typeof password !== 'string' || typeof fullName !== 'string' ||
+      !email.trim() || password.length < 8 || password.length > 128 || !fullName.trim()) {
       return res.status(400).json({ error: 'Email, password, and fullName are required.' });
     }
 
@@ -60,7 +92,7 @@ router.post('/register', async (req, res) => {
 
         const newUser = new User({
           email: emailClean,
-          passwordHash,
+          passwordHash: await hashPassword(password),
           fullName: fullName.trim(),
           custodialPublicKey: mockPublicKey,
           custodialSecretKey: 'SCKEYTEMPORARYDEMOSECRETKEY2026',
@@ -87,6 +119,7 @@ router.post('/register', async (req, res) => {
         email: emailClean,
         passwordHash,
         fullName: fullName.trim(),
+        passwordHash: await hashPassword(password),
         custodialPublicKey: mockPublicKey,
         createdAt: new Date().toISOString(),
       };
@@ -117,8 +150,8 @@ router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
     }
 
     const emailClean = email.toLowerCase().trim();
@@ -139,12 +172,16 @@ router.post('/login', async (req, res) => {
     }
 
     if (dbUser) {
-      if (
-        typeof password !== 'string' ||
-        typeof dbUser.passwordHash !== 'string' ||
-        !(await verifyPassword(password, dbUser.passwordHash))
-      ) {
+      const passwordResult = await verifyPassword(password, dbUser.passwordHash || '');
+      if (!passwordResult.valid) {
         return res.status(401).json({ error: 'Invalid email or password.' });
+      }
+
+      if (passwordResult.needsUpgrade) {
+        dbUser.passwordHash = await hashPassword(password);
+        if (isConnectedToMongo && typeof dbUser.save === 'function') {
+          await dbUser.save();
+        }
       }
 
       const userPayload = {
