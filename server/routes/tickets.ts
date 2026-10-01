@@ -159,24 +159,48 @@ router.post('/claim', async (req, res) => {
 // 3. Dispatch Progress Email Endpoint (Generic handler for frontend events)
 router.post('/send-progress-email', async (req, res) => {
   try {
-    const { stage, email, fullName, ticket, walletAddress, terminalId } = req.body;
+    const { stage, ticketId, email, terminalId } = req.body ?? {};
+    const validStages = ['purchase', 'claim', 'checkin'];
+    if (typeof stage !== 'string' || !validStages.includes(stage)) {
+      return res.status(400).json({ error: 'A valid email stage is required.' });
+    }
+    if (typeof ticketId !== 'string' || !ticketId.trim() || ticketId.trim().length > 100) {
+      return res.status(400).json({ error: 'A valid ticketId is required.' });
+    }
+    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ error: 'A valid recipient email is required.' });
+    }
+    if (stage === 'checkin' &&
+        (typeof terminalId !== 'string' || !terminalId.trim() || terminalId.trim().length > 100)) {
+      return res.status(400).json({ error: 'A valid terminalId is required for check-in emails.' });
+    }
 
-    if (!email) {
-      return res.status(400).json({ error: 'Recipient email is required' });
+    let ticket: any = Array.from(inMemoryStore.tickets.values()).find((entry) => entry.id === ticketId.trim());
+    if (!ticket && isConnectedToMongo) {
+      ticket = await Ticket.findOne({ id: ticketId.trim() });
+    }
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found.' });
+    if (typeof ticket.buyerName !== 'string' || !ticket.buyerName.trim() || ticket.buyerName.trim().length > 100 ||
+        typeof ticket.buyerEmail !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ticket.buyerEmail.trim())) {
+      return res.status(422).json({ error: 'Ticket recipient details are invalid.' });
+    }
+    if (email.trim().toLowerCase() !== ticket.buyerEmail.trim().toLowerCase()) {
+      return res.status(403).json({ error: 'Recipient must match the ticket owner email.' });
     }
 
     let success = false;
-    const recipientName = fullName || 'EventLink Attendee';
+    const recipientEmail = ticket.buyerEmail;
+    const recipientName = ticket.buyerName;
 
     if (stage === 'purchase') {
-      success = await sendPurchaseConfirmationEmail(email, recipientName, ticket || { eventTitle: 'Event Pass', id: 'TCK-MINTED' });
+      success = await sendPurchaseConfirmationEmail(recipientEmail, recipientName, ticket);
     } else if (stage === 'claim') {
-      success = await sendClaimConfirmationEmail(email, recipientName, ticket || { eventTitle: 'Event Pass' }, walletAddress || 'G...STELLAR');
+      success = await sendClaimConfirmationEmail(recipientEmail, recipientName, ticket, ticket.currentOwnerAddress);
     } else if (stage === 'checkin') {
-      success = await sendGateCheckinEmail(email, recipientName, ticket || { eventTitle: 'Event Pass' }, terminalId || 'GATE-TERMINAL-01');
+      success = await sendGateCheckinEmail(recipientEmail, recipientName, ticket, terminalId.trim());
     }
 
-    return res.json({ success, message: `Progress email [${stage}] sent to ${email}` });
+    return res.json({ success, message: `Progress email [${stage}] sent to ${recipientEmail}` });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || 'Failed to dispatch progress email' });
   }
