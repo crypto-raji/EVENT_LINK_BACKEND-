@@ -168,7 +168,7 @@ async function getTransporter(): Promise<{ transporter: nodemailer.Transporter; 
       port,
       secure: port === 465,
       auth: { user, pass },
-      tls: { rejectUnauthorized: false },
+      tls: { rejectUnauthorized: true },
     });
     return { transporter: realTransporter, senderEmail: user };
   }
@@ -193,7 +193,7 @@ async function getTransporter(): Promise<{ transporter: nodemailer.Transporter; 
         port,
         secure: false,
         auth: { user, pass },
-        tls: { rejectUnauthorized: false },
+        tls: { rejectUnauthorized: true },
       });
       return { transporter: fallbackTransporter, senderEmail: user || 'no-reply@eventlink.app' };
     }

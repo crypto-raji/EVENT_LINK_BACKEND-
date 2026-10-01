@@ -66,7 +66,9 @@ Copy `.env.example` and set values for the environment. Never commit `.env` file
 | `STRIPE_WEBHOOK_SECRET` | Production | Stripe webhook signing secret |
 | `FLUTTERWAVE_SECRET_HASH` | Production | Flutterwave webhook verification hash |
 | `SOROBAN_CONTRACT_ID` | No | Contract identifier included in minted ticket records |
+| `STELLAR_NETWORK` | No | Explicit Stellar network name; Friendbot requires `testnet` |
 | `STELLAR_HORIZON_URL` | No | Horizon endpoint; defaults to Stellar Testnet |
+| `STELLAR_FRIENDBOT_ENABLED` | Development | Must be `true` to fund accounts from Friendbot; ignored in production |
 
 ## Commands and CI
 
@@ -85,7 +87,7 @@ GitHub Actions runs a clean install and TypeScript typecheck for pull requests a
 - Use HTTPS and restrict CORS to the actual frontend origin before deploying.
 - The current event and ticket fallback store, webhook deduplication set, and webhook logs are process-local, not durable.
 - Review authentication and authorization on every route before production. Do not expose development/admin endpoints publicly without access controls.
-- The Stellar helper targets Testnet. Do not treat generated demo references or fallback transaction hashes as confirmed settlement.
+- The Stellar helper defaults to Testnet; configure `STELLAR_NETWORK` to select Testnet or Public. Do not treat generated demo references or fallback transaction hashes as confirmed settlement.
 
 ## Contributing
 

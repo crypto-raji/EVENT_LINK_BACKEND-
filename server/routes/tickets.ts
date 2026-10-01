@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { StrKey } from '@stellar/stellar-sdk';
 import { Ticket } from '../models/Ticket';
 import { inMemoryStore, isConnectedToMongo } from '../db';
 import {
@@ -14,6 +15,16 @@ const amountPatterns = {
   flutterwave: /^₦(?:\d+|\d{1,3}(?:,\d{3})+) NGN$/,
   stellar: /^\d{1,12}(?:\.\d{1,7})? XLM$/,
 };
+
+export function mergeTicketRecords(memoryTickets: any[], databaseTickets: any[]): any[] {
+  const ticketsById = new Map<string, any>();
+  memoryTickets.forEach((ticket) => ticketsById.set(ticket.id, ticket));
+  databaseTickets.forEach((ticket) => {
+    const record = typeof ticket.toObject === 'function' ? ticket.toObject() : ticket;
+    ticketsById.set(record.id, record);
+  });
+  return Array.from(ticketsById.values());
+}
 
 // 1. Purchase Ticket Endpoint
 router.post('/purchase', async (req, res) => {
@@ -86,41 +97,54 @@ router.post('/purchase', async (req, res) => {
 // 2. Claim Ticket Endpoint
 router.post('/claim', async (req, res) => {
   try {
-    const { claimCode, walletAddress, buyerEmail, buyerName } = req.body;
+    const { claimCode, walletAddress } = req.body;
+
+    if (typeof claimCode !== 'string' || !claimCode.trim()) {
+      return res.status(400).json({ error: 'A claim code is required.' });
+    }
+    if (typeof walletAddress !== 'string' || !StrKey.isValidEd25519PublicKey(walletAddress)) {
+      return res.status(400).json({ error: 'A valid Stellar public key is required.' });
+    }
 
     let ticket: any = null;
-    for (const t of inMemoryStore.tickets.values()) {
-      if (t.claimCode === claimCode) {
-        ticket = t;
-        break;
+
+    if (isConnectedToMongo) {
+      ticket = await Ticket.findOneAndUpdate(
+        { claimCode, status: 'claimable' },
+        { $set: { status: 'valid', currentOwnerAddress: walletAddress } },
+        { new: true },
+      );
+
+      if (!ticket) {
+        const existingTicket = await Ticket.exists({ claimCode });
+        return res.status(existingTicket ? 409 : 404).json({
+          error: existingTicket ? 'Ticket has already been claimed.' : 'Ticket claim code not found.',
+        });
       }
-    }
 
-    if (!ticket && isConnectedToMongo) {
-      ticket = await Ticket.findOne({ claimCode });
-    }
-
-    if (!ticket) {
-      // Build transient ticket object for claim email dispatch
-      ticket = {
-        eventTitle: 'DRIPS Soroban Hackathon Summit',
-        id: `TCK-${claimCode}`,
-        claimCode,
-      };
+      inMemoryStore.tickets.set(ticket.id, ticket);
     } else {
+      ticket = Array.from(inMemoryStore.tickets.values()).find((storedTicket) => storedTicket.claimCode === claimCode);
+
+      if (!ticket) {
+        return res.status(404).json({ error: 'Ticket claim code not found.' });
+      }
+      if (ticket.status !== 'claimable') {
+        return res.status(409).json({ error: 'Ticket has already been claimed.' });
+      }
+
       ticket.status = 'valid';
       ticket.currentOwnerAddress = walletAddress;
       inMemoryStore.tickets.set(ticket.id, ticket);
-      if (isConnectedToMongo && ticket.save) {
-        await ticket.save();
-      }
     }
 
-    const emailToUse = buyerEmail || ticket.buyerEmail || 'attendee@drips.org';
-    const nameToUse = buyerName || ticket.buyerName || 'Valued Attendee';
+    const emailToUse = ticket.buyerEmail;
+    const nameToUse = ticket.buyerName || 'Valued Attendee';
 
     // Trigger claim progress email
-    const emailSent = await sendClaimConfirmationEmail(emailToUse, nameToUse, ticket, walletAddress);
+    const emailSent = emailToUse
+      ? await sendClaimConfirmationEmail(emailToUse, nameToUse, ticket, walletAddress)
+      : false;
 
     return res.json({
       message: 'Ticket claimed successfully to self-custody wallet on Stellar.',
@@ -135,24 +159,48 @@ router.post('/claim', async (req, res) => {
 // 3. Dispatch Progress Email Endpoint (Generic handler for frontend events)
 router.post('/send-progress-email', async (req, res) => {
   try {
-    const { stage, email, fullName, ticket, walletAddress, terminalId } = req.body;
+    const { stage, ticketId, email, terminalId } = req.body ?? {};
+    const validStages = ['purchase', 'claim', 'checkin'];
+    if (typeof stage !== 'string' || !validStages.includes(stage)) {
+      return res.status(400).json({ error: 'A valid email stage is required.' });
+    }
+    if (typeof ticketId !== 'string' || !ticketId.trim() || ticketId.trim().length > 100) {
+      return res.status(400).json({ error: 'A valid ticketId is required.' });
+    }
+    if (typeof email !== 'string' || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ error: 'A valid recipient email is required.' });
+    }
+    if (stage === 'checkin' &&
+        (typeof terminalId !== 'string' || !terminalId.trim() || terminalId.trim().length > 100)) {
+      return res.status(400).json({ error: 'A valid terminalId is required for check-in emails.' });
+    }
 
-    if (!email) {
-      return res.status(400).json({ error: 'Recipient email is required' });
+    let ticket: any = Array.from(inMemoryStore.tickets.values()).find((entry) => entry.id === ticketId.trim());
+    if (!ticket && isConnectedToMongo) {
+      ticket = await Ticket.findOne({ id: ticketId.trim() });
+    }
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found.' });
+    if (typeof ticket.buyerName !== 'string' || !ticket.buyerName.trim() || ticket.buyerName.trim().length > 100 ||
+        typeof ticket.buyerEmail !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ticket.buyerEmail.trim())) {
+      return res.status(422).json({ error: 'Ticket recipient details are invalid.' });
+    }
+    if (email.trim().toLowerCase() !== ticket.buyerEmail.trim().toLowerCase()) {
+      return res.status(403).json({ error: 'Recipient must match the ticket owner email.' });
     }
 
     let success = false;
-    const recipientName = fullName || 'EventLink Attendee';
+    const recipientEmail = ticket.buyerEmail;
+    const recipientName = ticket.buyerName;
 
     if (stage === 'purchase') {
-      success = await sendPurchaseConfirmationEmail(email, recipientName, ticket || { eventTitle: 'Event Pass', id: 'TCK-MINTED' });
+      success = await sendPurchaseConfirmationEmail(recipientEmail, recipientName, ticket);
     } else if (stage === 'claim') {
-      success = await sendClaimConfirmationEmail(email, recipientName, ticket || { eventTitle: 'Event Pass' }, walletAddress || 'G...STELLAR');
+      success = await sendClaimConfirmationEmail(recipientEmail, recipientName, ticket, ticket.currentOwnerAddress);
     } else if (stage === 'checkin') {
-      success = await sendGateCheckinEmail(email, recipientName, ticket || { eventTitle: 'Event Pass' }, terminalId || 'GATE-TERMINAL-01');
+      success = await sendGateCheckinEmail(recipientEmail, recipientName, ticket, terminalId.trim());
     }
 
-    return res.json({ success, message: `Progress email [${stage}] sent to ${email}` });
+    return res.json({ success, message: `Progress email [${stage}] sent to ${recipientEmail}` });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || 'Failed to dispatch progress email' });
   }
@@ -164,7 +212,7 @@ router.get('/', async (_req, res) => {
     const memoryList = Array.from(inMemoryStore.tickets.values());
     if (isConnectedToMongo) {
       const dbTickets = await Ticket.find().sort({ createdAt: -1 });
-      return res.json([...memoryList, ...dbTickets]);
+      return res.json(mergeTicketRecords(memoryList, dbTickets));
     }
     return res.json(memoryList);
   } catch (error: any) {

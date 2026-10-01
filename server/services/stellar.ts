@@ -1,8 +1,21 @@
 import { Asset, Horizon, Keypair, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
 
 export const SOROBAN_CONTRACT_ID = process.env.SOROBAN_CONTRACT_ID || 'CDD3VJENDGV6LLOY2OCYQSRD5CQKYAPL4I3MNWFFQBXJ6P6KOJHQK47J';
-const HORIZON_URL = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+
+export function resolveStellarNetworkConfig(networkValue: string | undefined): { horizonUrl: string; networkPassphrase: string } {
+  const network = (networkValue || 'testnet').trim().toLowerCase();
+  if (network === 'testnet') {
+    return { horizonUrl: 'https://horizon-testnet.stellar.org', networkPassphrase: Networks.TESTNET };
+  }
+  if (network === 'public') {
+    return { horizonUrl: 'https://horizon.stellar.org', networkPassphrase: Networks.PUBLIC };
+  }
+  throw new Error('STELLAR_NETWORK must be either "testnet" or "public".');
+}
+
+const { horizonUrl: HORIZON_URL, networkPassphrase: NETWORK_PASSPHRASE } =
+  resolveStellarNetworkConfig(process.env.STELLAR_NETWORK);
 
 interface MintResult {
   custodialPublicKey: string;
@@ -15,14 +28,26 @@ interface MintResult {
 }
 
 async function createAndFundCustodialAccount(): Promise<{ publicKey: string; secretKey: string }> {
+  const friendbotEnabled = process.env.NODE_ENV !== 'production' &&
+    process.env.STELLAR_NETWORK === 'testnet' &&
+    process.env.STELLAR_FRIENDBOT_ENABLED === 'true';
+  if (!friendbotEnabled) {
+    throw new Error('Stellar Friendbot funding requires explicit testnet development configuration.');
+  }
+
   const keypair = Keypair.random();
   const publicKey = keypair.publicKey();
   const secretKey = keypair.secret();
 
+  let response: Response;
   try {
-    await fetch(`https://friendbot.stellar.org?addr=${encodeURIComponent(publicKey)}`);
-  } catch (error) {
-    console.warn('Stellar Friendbot funding notice:', error);
+    response = await fetch(`https://friendbot.stellar.org?addr=${encodeURIComponent(publicKey)}`);
+  } catch {
+    throw new Error('Unable to reach Stellar Friendbot to fund the custodial account.');
+  }
+  if (!response.ok) {
+    const details = (await response.text()).trim().slice(0, 300);
+    throw new Error(`Stellar Friendbot funding failed with HTTP ${response.status}${details ? `: ${details}` : '.'}`);
   }
 
   return { publicKey, secretKey };
@@ -35,7 +60,7 @@ async function submitOnChainTransaction(sourceSecretKey: string, destinationPubl
     const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
     const transaction = new TransactionBuilder(sourceAccount, {
       fee: '100',
-      networkPassphrase: Networks.TESTNET,
+      networkPassphrase: NETWORK_PASSPHRASE,
     })
       .addOperation(Operation.payment({
         destination: destinationPublicKey || sourceKeypair.publicKey(),

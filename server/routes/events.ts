@@ -4,6 +4,110 @@ import { EventModel } from '../models/Event';
 
 const router = Router();
 
+const eventTextLimits: Record<string, number> = {
+  title: 120,
+  tagline: 500,
+  category: 100,
+  date: 100,
+  time: 50,
+  location: 200,
+  venueName: 200,
+  imageUrl: 2048,
+  organizerName: 120,
+  organizerStellarAddress: 100,
+};
+
+function validateEventPayload(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return 'Event payload must be an object.';
+  }
+
+  const event = value as Record<string, unknown>;
+  const allowedFields = new Set([...Object.keys(eventTextLimits), 'royaltyPercentage', 'isFeatured', 'tiers']);
+  if (Object.keys(event).some((field) => !allowedFields.has(field))) {
+    return 'Event payload contains unsupported fields.';
+  }
+
+  for (const [field, maxLength] of Object.entries(eventTextLimits)) {
+    const fieldValue = event[field];
+    if (field === 'title' || field === 'date') {
+      if (typeof fieldValue !== 'string' || !fieldValue.trim() || fieldValue.trim().length > maxLength) {
+        return `${field} must be a non-empty string no longer than ${maxLength} characters.`;
+      }
+    } else if (fieldValue !== undefined && (typeof fieldValue !== 'string' || fieldValue.length > maxLength)) {
+      return `${field} must be a string no longer than ${maxLength} characters.`;
+    }
+  }
+
+  if (Number.isNaN(Date.parse((event.date as string).trim()))) {
+    return 'date must be a valid date.';
+  }
+
+  if (event.imageUrl !== undefined) {
+    try {
+      const imageUrl = new URL(event.imageUrl as string);
+      if (!['http:', 'https:'].includes(imageUrl.protocol)) return 'imageUrl must use HTTP or HTTPS.';
+    } catch {
+      return 'imageUrl must be a valid URL.';
+    }
+  }
+
+  if (event.royaltyPercentage !== undefined &&
+      (typeof event.royaltyPercentage !== 'number' || !Number.isFinite(event.royaltyPercentage) ||
+       event.royaltyPercentage < 0 || event.royaltyPercentage > 100)) {
+    return 'royaltyPercentage must be a number between 0 and 100.';
+  }
+  if (event.isFeatured !== undefined && typeof event.isFeatured !== 'boolean') {
+    return 'isFeatured must be a boolean.';
+  }
+
+  if (event.tiers !== undefined) {
+    if (!Array.isArray(event.tiers) || event.tiers.length > 100) return 'tiers must be an array of at most 100 items.';
+    for (const tier of event.tiers) {
+      if (!tier || typeof tier !== 'object' || Array.isArray(tier)) return 'Each tier must be an object.';
+      const tierData = tier as Record<string, unknown>;
+      const allowedTierFields = new Set(['id', 'name', 'priceUSD', 'priceNGN', 'priceXLM', 'perks', 'totalAvailable', 'remaining']);
+      if (Object.keys(tierData).some((field) => !allowedTierFields.has(field))) return 'Tier contains unsupported fields.';
+      if (typeof tierData.name !== 'string' || !tierData.name.trim() || tierData.name.length > 100) {
+        return 'Each tier must have a name between 1 and 100 characters.';
+      }
+      if (tierData.id !== undefined && (typeof tierData.id !== 'string' || tierData.id.length > 100)) {
+        return 'Tier id must be a string no longer than 100 characters.';
+      }
+
+      const priceFields = ['priceUSD', 'priceNGN', 'priceXLM'];
+      const definedPrices = priceFields.filter((field) => tierData[field] !== undefined);
+      if (definedPrices.length === 0) return 'Each tier must include at least one price.';
+      for (const field of definedPrices) {
+        const price = tierData[field];
+        if (typeof price !== 'number' || !Number.isFinite(price) || price < 0 || price > 1_000_000_000_000) {
+          return `${field} must be a finite non-negative number.`;
+        }
+      }
+
+      if (tierData.perks !== undefined &&
+          (!Array.isArray(tierData.perks) || tierData.perks.length > 50 ||
+           tierData.perks.some((perk) => typeof perk !== 'string' || perk.length > 200))) {
+        return 'Tier perks must be an array of at most 50 strings, each no longer than 200 characters.';
+      }
+
+      for (const field of ['totalAvailable', 'remaining']) {
+        const capacity = tierData[field];
+        if (capacity !== undefined &&
+            (typeof capacity !== 'number' || !Number.isInteger(capacity) || capacity < 0 || capacity > 1_000_000_000)) {
+          return `Tier ${field} must be a non-negative integer.`;
+        }
+      }
+      if (typeof tierData.totalAvailable === 'number' && typeof tierData.remaining === 'number' &&
+          tierData.remaining > tierData.totalAvailable) {
+        return 'Tier remaining capacity cannot exceed totalAvailable.';
+      }
+    }
+  }
+
+  return null;
+}
+
 const INITIAL_EVENTS = [
   {
     id: 'evt-001',
@@ -76,6 +180,11 @@ INITIAL_EVENTS.forEach((evt) => {
   inMemoryStore.events.set(evt.id, evt);
 });
 
+export async function persistEvent(event: any, saveToDatabase?: () => Promise<unknown>): Promise<void> {
+  if (saveToDatabase) await saveToDatabase();
+  inMemoryStore.events.set(event.id, event);
+}
+
 /**
  * GET /api/events - Retrieve all events live from database
  */
@@ -102,11 +211,10 @@ router.get('/', async (_req: Request, res: Response) => {
  */
 router.post('/', async (req: Request, res: Response) => {
   try {
-    const eventData = req.body;
+    const validationError = validateEventPayload(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
 
-    if (!eventData.title || !eventData.date) {
-      return res.status(400).json({ error: 'Title and Date are required' });
-    }
+    const eventData = req.body;
 
     const eventId = eventData.id || `evt-${Math.floor(100000 + Math.random() * 900000)}`;
     const fullEvent = {
@@ -115,23 +223,21 @@ router.post('/', async (req: Request, res: Response) => {
       createdAt: new Date().toISOString(),
     };
 
-    // Save in memory store
-    inMemoryStore.events.set(eventId, fullEvent);
-
-    // Save in MongoDB if connected
     if (isConnectedToMongo) {
       try {
         const newEventObj = new EventModel(fullEvent);
         await newEventObj.save();
       } catch (dbErr) {
         console.warn('MongoDB event save warning:', dbErr);
+        return res.status(503).json({ error: 'Event persistence is unavailable. Please retry.' });
       }
     }
 
+    inMemoryStore.events.set(eventId, fullEvent);
     console.log(`[DB EVENT SAVED] Created event "${fullEvent.title}" (ID: ${eventId})`);
 
     return res.status(201).json({
-      message: 'Event created and saved persistently in database.',
+      message: 'Event created successfully.',
       event: fullEvent,
     });
   } catch (error: any) {
