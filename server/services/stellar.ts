@@ -14,7 +14,15 @@ interface MintResult {
   mintTimestamp: string;
 }
 
+export function isFriendbotEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment.NODE_ENV !== 'production' && environment.STELLAR_USE_FRIENDBOT === 'true';
+}
+
 async function createAndFundCustodialAccount(): Promise<{ publicKey: string; secretKey: string }> {
+  if (!isFriendbotEnabled()) {
+    throw new Error('Stellar Friendbot requires STELLAR_USE_FRIENDBOT=true outside production.');
+  }
+
   const keypair = Keypair.random();
   const publicKey = keypair.publicKey();
   const secretKey = keypair.secret();

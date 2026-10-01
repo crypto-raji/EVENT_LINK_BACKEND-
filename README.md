@@ -67,6 +67,7 @@ Copy `.env.example` and set values for the environment. Never commit `.env` file
 | `FLUTTERWAVE_SECRET_HASH` | Production | Flutterwave webhook verification hash |
 | `SOROBAN_CONTRACT_ID` | No | Contract identifier included in minted ticket records |
 | `STELLAR_HORIZON_URL` | No | Horizon endpoint; defaults to Stellar Testnet |
+| `STELLAR_USE_FRIENDBOT` | No | Set to `true` to enable Testnet faucet funding outside production; defaults to disabled |
 
 ## Commands and CI
 
