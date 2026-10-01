@@ -66,7 +66,9 @@ Copy `.env.example` and set values for the environment. Never commit `.env` file
 | `STRIPE_WEBHOOK_SECRET` | Production | Stripe webhook signing secret |
 | `FLUTTERWAVE_SECRET_HASH` | Production | Flutterwave webhook verification hash |
 | `SOROBAN_CONTRACT_ID` | No | Contract identifier included in minted ticket records |
-| `STELLAR_NETWORK` | No | Stellar network and matching Horizon endpoint: `testnet` (default) or `public` |
+| `STELLAR_NETWORK` | No | Explicit Stellar network name; Friendbot requires `testnet` |
+| `STELLAR_HORIZON_URL` | No | Horizon endpoint; defaults to Stellar Testnet |
+| `STELLAR_FRIENDBOT_ENABLED` | Development | Must be `true` to fund accounts from Friendbot; ignored in production |
 
 ## Commands and CI
 

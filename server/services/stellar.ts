@@ -28,6 +28,13 @@ interface MintResult {
 }
 
 async function createAndFundCustodialAccount(): Promise<{ publicKey: string; secretKey: string }> {
+  const friendbotEnabled = process.env.NODE_ENV !== 'production' &&
+    process.env.STELLAR_NETWORK === 'testnet' &&
+    process.env.STELLAR_FRIENDBOT_ENABLED === 'true';
+  if (!friendbotEnabled) {
+    throw new Error('Stellar Friendbot funding requires explicit testnet development configuration.');
+  }
+
   const keypair = Keypair.random();
   const publicKey = keypair.publicKey();
   const secretKey = keypair.secret();
