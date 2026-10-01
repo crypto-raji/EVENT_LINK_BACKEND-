@@ -68,7 +68,11 @@ async function bootstrap() {
     }
   }
 
-  await connectDatabase();
+  const databaseConnected = await connectDatabase();
+  if (process.env.NODE_ENV === 'production' && !databaseConnected) {
+    throw new Error('A reachable MONGODB_URI is required in production.');
+  }
+
   app.listen(PORT, () => {
     console.log(`⚡ EventLink Node.js Backend API running on http://localhost:${PORT}`);
   });
