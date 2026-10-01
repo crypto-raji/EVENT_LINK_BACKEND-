@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import jwt from 'jsonwebtoken';
 import { Ticket } from '../models/Ticket';
 import { inMemoryStore, isConnectedToMongo } from '../db';
 import {
@@ -8,12 +9,36 @@ import {
 } from '../services/emailService';
 
 const router = Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'eventlink_production_jwt_secret_key_2026';
 const SOROBAN_CONTRACT_ID = process.env.SOROBAN_CONTRACT_ID || 'CDD3VJENDGV6LLOY2OCYQSRD5CQKYAPL4I3MNWFFQBXJ6P6KOJHQK47J';
 const amountPatterns = {
   stripe: /^\$\d{1,9}(?:\.\d{1,2})? USD$/,
   flutterwave: /^₦(?:\d+|\d{1,3}(?:,\d{3})+) NGN$/,
   stellar: /^\d{1,12}(?:\.\d{1,7})? XLM$/,
 };
+
+export function validateProgressEmailRequest(body: unknown, authenticatedEmail: string, ticket: any): string | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'Invalid progress email request.';
+  const request = body as Record<string, unknown>;
+  if (Object.keys(request).some((key) => !['stage', 'ticketId'].includes(key))) {
+    return 'Only stage and ticketId may be provided.';
+  }
+  if (!['purchase', 'claim', 'checkin'].includes(String(request.stage))) return 'A valid progress email stage is required.';
+  if (typeof request.ticketId !== 'string' || !request.ticketId.trim() || request.ticketId !== ticket?.id) {
+    return 'A valid ticketId is required.';
+  }
+  if (typeof ticket.buyerEmail !== 'string' || ticket.buyerEmail.toLowerCase() !== authenticatedEmail.toLowerCase()) {
+    return 'Ticket not found for this account.';
+  }
+  if (typeof ticket.buyerName !== 'string' || typeof ticket.eventTitle !== 'string') {
+    return 'Ticket record is incomplete.';
+  }
+  if (request.stage === 'claim' && !['valid', 'used', 'proof_nft'].includes(ticket.status)) {
+    return 'Ticket has not been claimed.';
+  }
+  if (request.stage === 'checkin' && ticket.status !== 'used') return 'Ticket has not been checked in.';
+  return null;
+}
 
 // 1. Purchase Ticket Endpoint
 router.post('/purchase', async (req, res) => {
@@ -135,24 +160,42 @@ router.post('/claim', async (req, res) => {
 // 3. Dispatch Progress Email Endpoint (Generic handler for frontend events)
 router.post('/send-progress-email', async (req, res) => {
   try {
-    const { stage, email, fullName, ticket, walletAddress, terminalId } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ error: 'Recipient email is required' });
+    const authorization = req.get('authorization');
+    if (!authorization?.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Authentication required.' });
     }
+
+    let authenticatedEmail: string;
+    try {
+      const claims = jwt.verify(authorization.slice('Bearer '.length), JWT_SECRET);
+      authenticatedEmail = typeof claims === 'object' && claims !== null && typeof claims.email === 'string'
+        ? claims.email.toLowerCase().trim()
+        : '';
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token.' });
+    }
+    if (!authenticatedEmail) return res.status(401).json({ error: 'Invalid or expired token.' });
+
+    const { stage, ticketId } = req.body ?? {};
+    if (typeof ticketId !== 'string') return res.status(400).json({ error: 'A valid ticketId is required.' });
+
+    let ticket = inMemoryStore.tickets.get(ticketId);
+    if (!ticket && isConnectedToMongo) ticket = await Ticket.findOne({ id: ticketId });
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found for this account.' });
+
+    const validationError = validateProgressEmailRequest(req.body, authenticatedEmail, ticket);
+    if (validationError) return res.status(400).json({ error: validationError });
 
     let success = false;
-    const recipientName = fullName || 'EventLink Attendee';
-
     if (stage === 'purchase') {
-      success = await sendPurchaseConfirmationEmail(email, recipientName, ticket || { eventTitle: 'Event Pass', id: 'TCK-MINTED' });
+      success = await sendPurchaseConfirmationEmail(ticket.buyerEmail, ticket.buyerName, ticket);
     } else if (stage === 'claim') {
-      success = await sendClaimConfirmationEmail(email, recipientName, ticket || { eventTitle: 'Event Pass' }, walletAddress || 'G...STELLAR');
+      success = await sendClaimConfirmationEmail(ticket.buyerEmail, ticket.buyerName, ticket, ticket.currentOwnerAddress);
     } else if (stage === 'checkin') {
-      success = await sendGateCheckinEmail(email, recipientName, ticket || { eventTitle: 'Event Pass' }, terminalId || 'GATE-TERMINAL-01');
+      success = await sendGateCheckinEmail(ticket.buyerEmail, ticket.buyerName, ticket, 'EventLink Gate');
     }
 
-    return res.json({ success, message: `Progress email [${stage}] sent to ${email}` });
+    return res.json({ success, message: `Progress email [${stage}] sent to ticket owner.` });
   } catch (error: any) {
     return res.status(500).json({ error: error.message || 'Failed to dispatch progress email' });
   }
